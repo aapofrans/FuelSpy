@@ -1,84 +1,19 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useEffect, useMemo, useState } from "react";
-import {
-  MapContainer,
-  Marker,
-  Popup,
-  TileLayer,
-  useMap,
-  Circle,
-} from "react-leaflet";
-import "leaflet/dist/leaflet.css";
+import { supabase } from "@/lib/supabase";
+import type { Station } from "./components/FuelMap";
 
-type Station = {
-  id: string;
-  name: string;
-  lat: number;
-  lon: number;
-  price: number;
-  updatedAt: string;
-  source: "user" | "avg";
-};
-
-const DEFAULT_CENTER: [number, number] = [61.4851, 21.7974]; // Pori
-
-
-
-const redIcon = L.divIcon({
-  className: "",
-  html: `
-    <div style="
-      width: 18px;
-      height: 18px;
-      background: #ef4444;
-      border: 3px solid white;
-      border-radius: 9999px;
-      box-shadow: 0 0 0 2px rgba(0,0,0,0.25);
-    "></div>
-  `,
-  iconSize: [18, 18],
-  iconAnchor: [9, 9],
+const FuelMap = dynamic(() => import("./components/FuelMap"), {
+  ssr: false,
 });
 
-const greenIcon = L.divIcon({
-  className: "",
-  html: `
-    <div style="
-      width: 22px;
-      height: 22px;
-      background: #22c55e;
-      border: 3px solid white;
-      border-radius: 9999px;
-      box-shadow: 0 0 0 3px rgba(0,0,0,0.25);
-    "></div>
-  `,
-  iconSize: [22, 22],
-  iconAnchor: [11, 11],
-});
+const DEFAULT_CENTER: [number, number] = [61.4851, 21.7974];
 
-const userIcon = L.divIcon({
-  className: "",
-  html: `
-    <div style="
-      width: 20px;
-      height: 20px;
-      background: #3b82f6;
-      border: 4px solid white;
-      border-radius: 9999px;
-      box-shadow: 0 0 0 3px rgba(59,130,246,0.25);
-    "></div>
-  `,
-  iconSize: [20, 20],
-  iconAnchor: [10, 10],
-});
+const MAX_UPDATE_DISTANCE_KM = 0.5;
 
-function getDistance(
-  lat1: number,
-  lon1: number,
-  lat2: number,
-  lon2: number
-) {
+function getDistance(lat1: number, lon1: number, lat2: number, lon2: number) {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLon = ((lon2 - lon1) * Math.PI) / 180;
@@ -92,85 +27,32 @@ function getDistance(
   return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
 
-function FixMapSize() {
-  const map = useMap();
+function formatRelativeTime(input: string) {
+  const date = new Date(input);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
 
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      map.invalidateSize();
-    }, 100);
+  const minutes = Math.floor(diffMs / 60000);
+  const hours = Math.floor(diffMs / 3600000);
 
-    return () => clearTimeout(timer);
-  }, [map]);
+  if (minutes < 1) return "just nyt";
+  if (minutes < 60) return `${minutes} min sitten`;
+  if (hours < 24) return `${hours} h sitten`;
 
-  return null;
-}
-
-function RecenterMap({ center }: { center: [number, number] }) {
-  const map = useMap();
-
-  useEffect(() => {
-    map.setView(center, 11);
-  }, [center, map]);
-
-  return null;
+  return date.toLocaleString("fi-FI");
 }
 
 export default function Home() {
+  const [stations, setStations] = useState<Station[]>([]);
+  const [loadingStations, setLoadingStations] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [draftPrices, setDraftPrices] = useState<Record<string, string>>({});
   const [userLocation, setUserLocation] = useState<[number, number] | null>(
     null
   );
   const [radiusKm, setRadiusKm] = useState(5);
 
-  const [stations, setStations] = useState<Station[]>([
-    {
-      id: "pori-1",
-      name: "Neste Pori Tiilimäki",
-      lat: 61.47764,
-      lon: 21.781168,
-      price: 1.799,
-      updatedAt: "5 min sitten",
-      source: "user",
-    },
-    {
-      id: "pori-2",
-      name: "ABC Pori",
-      lat: 61.478879,
-      lon: 21.757725,
-      price: 1.829,
-      updatedAt: "18 min sitten",
-      source: "avg",
-    },
-    {
-      id: "pori-3",
-      name: "Neste Express Kampus",
-      lat: 61.47558,
-      lon: 21.794265,
-      price: 1.789,
-      updatedAt: "2 min sitten",
-      source: "user",
-    },
-    {
-      id: "pori-4",
-      name: "Neste Pori Siltapuisto",
-      lat: 61.497764,
-      lon: 21.804629,
-      price: 1.819,
-      updatedAt: "25 min sitten",
-      source: "avg",
-    },
-    {
-      id: "pori-5",
-      name: "ABC Ulvila",
-      lat: 61.42617,
-      lon: 21.870421,
-      price: 1.809,
-      updatedAt: "just nyt",
-      source: "user",
-    },
-  ]);
-
-  const [draftPrices, setDraftPrices] = useState<Record<string, string>>({});
+  const MAX_UPDATE_DISTANCE_KM = 0.5;
 
   useEffect(() => {
     navigator.geolocation.getCurrentPosition(
@@ -187,7 +69,63 @@ export default function Home() {
     );
   }, []);
 
-  function updateStationPrice(stationId: string) {
+  useEffect(() => {
+    async function loadStations() {
+      try {
+        setLoadingStations(true);
+        setLoadError("");
+
+        const { data: stationRows, error: stationError } = await supabase
+          .from("stations")
+          .select("*")
+          .order("name", { ascending: true });
+
+        if (stationError) {
+          console.error("stations error:", stationError);
+          setLoadError("Asemien haku epäonnistui: " + stationError.message);
+          return;
+        }
+
+        const { data: priceRows, error: priceError } = await supabase
+          .from("price_updates")
+          .select("*")
+          .order("created_at", { ascending: false });
+
+        if (priceError) {
+          console.error("price_updates error:", priceError);
+          setLoadError("Hintojen haku epäonnistui: " + priceError.message);
+          return;
+        }
+
+        const mapped: Station[] = (stationRows || []).map((station) => {
+          const latest = (priceRows || []).find(
+            (p) => p.station_id === station.id
+          );
+
+          return {
+            id: station.id,
+            name: station.name,
+            lat: station.lat,
+            lon: station.lon,
+            price: latest ? Number(latest.price) : 0,
+            updatedAt: latest ? formatRelativeTime(latest.created_at) : "-",
+            source: latest?.source === "avg" ? "avg" : "user",
+          };
+        });
+
+        setStations(mapped);
+      } catch (error) {
+        console.error("loadStations crash:", error);
+        setLoadError("Datassa tapahtui virhe");
+      } finally {
+        setLoadingStations(false);
+      }
+    }
+
+    loadStations();
+  }, []);
+
+  async function updateStationPrice(stationId: string) {
     const rawValue = draftPrices[stationId];
 
     if (!rawValue) return;
@@ -199,16 +137,56 @@ export default function Home() {
       return;
     }
 
+    if (!userLocation) {
+      alert("Sijaintia ei löytynyt. Salli sijainnin käyttö ensin.");
+      return;
+    }
+
+    const station = stations.find((s) => s.id === stationId);
+
+    if (!station) {
+      alert("Asemaa ei löytynyt.");
+      return;
+    }
+
+    const distanceKm = getDistance(
+      userLocation[0],
+      userLocation[1],
+      station.lat,
+      station.lon
+    );
+
+    if (distanceKm > MAX_UPDATE_DISTANCE_KM) {
+      alert(
+        `Voit päivittää hinnan vain, jos olet enintään ${MAX_UPDATE_DISTANCE_KM.toFixed(
+          1
+        )} km päässä asemasta. Olet nyt ${distanceKm.toFixed(2)} km päässä.`
+      );
+      return;
+    }
+
+    const { error } = await supabase.from("price_updates").insert({
+      station_id: stationId,
+      price: parsedPrice,
+      source: "user",
+    });
+
+    if (error) {
+      console.error("insert error:", error);
+      alert("Hinnan tallennus epäonnistui: " + error.message);
+      return;
+    }
+
     setStations((prevStations) =>
-      prevStations.map((station) =>
-        station.id === stationId
+      prevStations.map((s) =>
+        s.id === stationId
           ? {
-              ...station,
+              ...s,
               price: parsedPrice,
               updatedAt: "just nyt",
               source: "user",
             }
-          : station
+          : s
       )
     );
 
@@ -247,7 +225,7 @@ export default function Home() {
     <main className="h-screen w-full">
       <div className="absolute left-4 top-4 z-[1000] w-[320px] rounded-2xl bg-white/95 p-4 shadow-xl">
         <h1 className="text-2xl font-bold">FuelSpy</h1>
-        <p className="mt-1 text-sm text-gray-600">Testiasemat Porin alueella</p>
+        <p className="mt-1 text-sm text-gray-600">Porin alueen asemat</p>
 
         <div className="mt-4 flex flex-wrap gap-2">
           {[5, 10, 15, 20, 40, 60, 80, 100].map((km) => (
@@ -265,7 +243,19 @@ export default function Home() {
           ))}
         </div>
 
-        {cheapestNearby && (
+        {loadingStations && (
+          <div className="mt-4 rounded-lg border border-gray-200 px-3 py-4 text-sm text-gray-500">
+            Ladataan asemia...
+          </div>
+        )}
+
+        {loadError && (
+          <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-4 text-sm text-red-700">
+            {loadError}
+          </div>
+        )}
+
+        {!loadingStations && !loadError && cheapestNearby && (
           <div className="mt-4 rounded-xl border border-green-200 bg-green-50 p-3">
             <p className="text-xs font-semibold uppercase tracking-wide text-green-700">
               Halvin {radiusKm} km säteellä
@@ -279,131 +269,107 @@ export default function Home() {
           </div>
         )}
 
-        {filteredStations.length === 0 ? (
-          <div className="mt-4 rounded-lg border border-gray-200 px-3 py-4 text-sm text-gray-500">
-            Tällä säteellä ei löytynyt asemia.
-          </div>
-        ) : (
-          <div className="mt-4 space-y-2">
-            {filteredStations.map((station) => (
-              <div
-                key={station.id}
-                className="rounded-lg border border-gray-200 px-3 py-2"
-              >
-                <div className="font-semibold">{station.name}</div>
-
-                <div className="text-sm text-gray-600">
-                  {station.price.toFixed(3)} €/L
-                  {userLocation && (
-                    <span className="ml-2">
-                      •{" "}
-                      {getDistance(
+        {!loadingStations && !loadError && (
+          <>
+            {filteredStations.length === 0 ? (
+              <div className="mt-4 rounded-lg border border-gray-200 px-3 py-4 text-sm text-gray-500">
+                Tällä säteellä ei löytynyt asemia.
+              </div>
+            ) : (
+              <div className="mt-4 max-h-[60vh] space-y-2 overflow-auto">
+                {filteredStations.map((station) => {
+                  const distanceToStation = userLocation
+                    ? getDistance(
                         userLocation[0],
                         userLocation[1],
                         station.lat,
                         station.lon
-                      ).toFixed(1)}{" "}
-                      km
-                    </span>
-                  )}
-                </div>
+                      )
+                    : null;
 
-                <div className="text-xs text-gray-500 mt-1">
-                  🕒 {station.updatedAt} •{" "}
-                  {station.source === "user"
-                    ? "Käyttäjän päivitys"
-                    : "Keskiarvo"}
-                </div>
+                  const canUpdate =
+                    distanceToStation !== null &&
+                    distanceToStation <= MAX_UPDATE_DISTANCE_KM;
+
+                  return (
+                    <div
+                      key={station.id}
+                      className="rounded-lg border border-gray-200 px-3 py-2"
+                    >
+                      <div className="font-semibold">{station.name}</div>
+
+                      <div className="text-sm text-gray-600">
+                        {station.price.toFixed(3)} €/L
+                        {userLocation && (
+                          <span className="ml-2">
+                            • {distanceToStation?.toFixed(1)} km
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="mt-1 text-xs text-gray-500">
+                        🕒 {station.updatedAt} •{" "}
+                        {station.source === "user"
+                          ? "Käyttäjän päivitys"
+                          : "Keskiarvo"}
+                      </div>
+
+                      <div className="mt-3">
+                        <input
+                          type="text"
+                          placeholder="Esim. 1.799"
+                          value={draftPrices[station.id] ?? ""}
+                          onChange={(e) =>
+                            setDraftPrices((prev) => ({
+                              ...prev,
+                              [station.id]: e.target.value,
+                            }))
+                          }
+                          className="w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                        />
+
+                        {userLocation && (
+                          <div className="mt-2 text-xs text-gray-500">
+                            Päivitys sallittu vain alle{" "}
+                            {MAX_UPDATE_DISTANCE_KM} km etäisyydellä. Nyt:{" "}
+                            {distanceToStation?.toFixed(2)} km
+                          </div>
+                        )}
+
+                        {!userLocation && (
+                          <div className="mt-2 text-xs text-gray-500">
+                            Salli sijainti, jotta voit päivittää hinnan.
+                          </div>
+                        )}
+
+                        <button
+                          onClick={() => updateStationPrice(station.id)}
+                          disabled={!canUpdate}
+                          className={`mt-2 w-full rounded px-3 py-2 text-sm font-medium text-white ${
+                            canUpdate
+                              ? "bg-blue-600"
+                              : "bg-gray-400 cursor-not-allowed"
+                          }`}
+                        >
+                          Tallenna uusi hinta
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            ))}
-          </div>
+            )}
+          </>
         )}
       </div>
 
-      <MapContainer
-        center={mapCenter}
-        zoom={11}
-        style={{ height: "100%", width: "100%" }}
-      >
-        <TileLayer
-          attribution="&copy; OpenStreetMap contributors"
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        />
-
-        <FixMapSize />
-        <RecenterMap center={mapCenter} />
-
-        {userLocation && (
-          <Marker position={userLocation} icon={userIcon}>
-            <Popup>Sinä olet täällä 📍</Popup>
-          </Marker>
-        )}
-
-        {userLocation && (
-          <Circle
-            center={userLocation}
-            radius={radiusKm * 1000}
-            pathOptions={{
-              color: "#2563eb",
-              fillColor: "#3b82f6",
-              fillOpacity: 0.12,
-            }}
-          />
-        )}
-
-        {filteredStations.map((station) => {
-          const isCheapest = cheapestNearby?.id === station.id;
-
-          return (
-            <Marker
-              key={station.id}
-              position={[station.lat, station.lon]}
-              icon={isCheapest ? greenIcon : redIcon}
-            >
-              <Popup>
-                <div className="min-w-[220px]">
-                  <strong>{station.name}</strong>
-                  <br />
-                  💰 {station.price.toFixed(3)} €/L
-                  <br />
-                  🕒 {station.updatedAt}
-                  <br />
-                  📌{" "}
-                  {station.source === "user"
-                    ? "Käyttäjän päivitys"
-                    : "Keskiarvo"}
-
-                  <div className="mt-3">
-                    <label className="mb-1 block text-xs font-medium text-gray-600">
-                      Päivitä hinta
-                    </label>
-
-                    <input
-                      type="text"
-                      placeholder="Esim. 1.799"
-                      value={draftPrices[station.id] ?? ""}
-                      onChange={(e) =>
-                        setDraftPrices((prev) => ({
-                          ...prev,
-                          [station.id]: e.target.value,
-                        }))
-                      }
-                      className="w-full rounded border border-gray-300 px-2 py-1 text-sm"
-                    />
-
-                    <button
-                      onClick={() => updateStationPrice(station.id)}
-                      className="mt-2 w-full rounded bg-blue-600 px-3 py-2 text-sm font-medium text-white"
-                    >
-                      Tallenna uusi hinta
-                    </button>
-                  </div>
-                </div>
-              </Popup>
-            </Marker>
-          );
-        })}
-      </MapContainer>
+      <FuelMap
+        mapCenter={mapCenter}
+        userLocation={userLocation}
+        radiusKm={radiusKm}
+        filteredStations={filteredStations}
+        cheapestNearby={cheapestNearby}
+      />
     </main>
   );
 }
